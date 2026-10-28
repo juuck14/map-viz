@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Map Coloring, Step by Step</title>
+<meta name="description" content="An interactive look at how greedy coloring, DSATUR and backtracking choose colors for a map, and what happens when a coloring attempt gets stuck.">
+<!-- inline: style.css -->
+</head>
+<body>
+<header class="top">
+  <p class="eyebrow">AI-Based Mathematical Discovery · Visualization project</p>
+  <h1>Map coloring, step by step</h1>
+  <p class="lede">
+    Four colors are always enough to color a map so that neighboring regions differ.
+    Knowing that does not tell you which color to choose next. Color a map yourself,
+    then watch three strategies make their choices, get stuck, and recover.
+  </p>
+</header>
+
+<main class="layout">
+  <section class="stage" aria-label="Map">
+    <div class="map-bar">
+      <div class="seg" id="map-tabs" role="tablist" aria-label="Choose a map"></div>
+      <label class="switch">
+        <input type="checkbox" id="show-graph">
+        <span class="switch-track" aria-hidden="true"></span>
+        <span>Show as graph</span>
+      </label>
+    </div>
+    <div class="map-frame">
+      <svg id="map" role="img" aria-labelledby="map-title"><title id="map-title">Map</title></svg>
+    </div>
+    <div class="legend" aria-label="Colors">
+      <span class="legend-item"><i class="sw c1"></i>1 blue</span>
+      <span class="legend-item"><i class="sw c2"></i>2 yellow</span>
+      <span class="legend-item"><i class="sw c3"></i>3 pink</span>
+      <span class="legend-item"><i class="sw c4"></i>4 green</span>
+      <span class="legend-item legend-conflict"><i class="sw-conflict"></i>same color on both sides</span>
+    </div>
+    <p class="inspector" id="inspector" aria-live="polite"></p>
+    <p class="map-note" id="map-note"></p>
+  </section>
+
+  <aside class="panel" aria-label="Controls">
+    <div class="seg seg-wide" id="mode-tabs" role="tablist" aria-label="Mode">
+      <button role="tab" data-mode="manual">Color it yourself</button>
+      <button role="tab" data-mode="algo">Watch an algorithm</button>
+    </div>
+
+    <section id="manual-panel" class="mode-panel">
+      <p class="hint">Pick a color, then click regions. Click a region again with the same color to clear it.</p>
+      <div class="brushes" id="brushes" role="radiogroup" aria-label="Brush"></div>
+      <p class="status" id="manual-status"></p>
+      <div class="verdict" id="manual-verdict" aria-live="polite"></div>
+      <div class="row">
+        <button id="manual-clear" class="btn">Clear map</button>
+      </div>
+    </section>
+
+    <section id="algo-panel" class="mode-panel">
+      <div class="seg" id="algo-tabs" role="tablist" aria-label="Algorithm">
+        <button role="tab" data-algo="greedy">Greedy</button>
+        <button role="tab" data-algo="dsatur">DSATUR</button>
+        <button role="tab" data-algo="backtrack">Backtracking</button>
+      </div>
+      <p class="algo-desc" id="algo-desc"></p>
+
+      <div class="order-row" id="order-row">
+        <label for="order-select">Order</label>
+        <select id="order-select"></select>
+        <button id="order-shuffle" class="btn btn-small">Shuffle</button>
+        <button id="order-repick" class="btn btn-small">Pick again</button>
+      </div>
+      <ol class="order-strip" id="order-strip" aria-label="Order of regions"></ol>
+
+      <div class="controls" role="group" aria-label="Playback">
+        <button class="btn icon" id="to-start" title="First step (Home)" aria-label="First step">⏮</button>
+        <button class="btn icon" id="step-back" title="Previous step (←)" aria-label="Previous step">◀</button>
+        <button class="btn icon play" id="play" title="Play / pause (Space)" aria-label="Play">▶</button>
+        <button class="btn icon" id="step-fwd" title="Next step (→)" aria-label="Next step">▶|</button>
+        <button class="btn icon" id="to-end" title="Last step (End)" aria-label="Last step">⏭</button>
+        <label class="speed">Speed
+          <select id="speed">
+            <option value="0.5">slow</option>
+            <option value="1.25" selected>normal</option>
+            <option value="4">fast</option>
+            <option value="25">very fast</option>
+          </select>
+        </label>
+      </div>
+      <div class="scrub">
+        <input type="range" id="scrub" min="0" max="0" value="0" aria-label="Step">
+        <span id="step-count" class="step-count"></span>
+      </div>
+
+      <div class="explain" id="explain" aria-live="polite"></div>
+      <div class="choices" id="choices"></div>
+      <p class="stats" id="stats"></p>
+    </section>
+  </aside>
+</main>
+
+<footer class="notes">
+  <section>
+    <h2>The rules</h2>
+    <p>Each region is one connected piece. Two regions are <em>neighbors</em> when they share a
+      stretch of border; touching at a single point does not count. A coloring is valid when no
+      two neighbors have the same color. The Four Color Theorem (Appel and Haken, 1976) says every
+      such map can be colored with four colors. It does not say how to find the coloring.</p>
+  </section>
+  <section>
+    <h2>Map and graph</h2>
+    <p>Put a dot in every region and join two dots when the regions are neighbors. Coloring the
+      map is the same as coloring the dots so that joined dots differ. Each line of the graph
+      crosses the border it stands for.</p>
+  </section>
+  <section>
+    <h2>Checking</h2>
+    <p>Neighbors are found from the shapes themselves: two borders must overlap along a segment.
+      A separate checker reads neighbors directly from the grid each map is drawn on, and
+      re-checks every finished coloring shown here.</p>
+  </section>
+</footer>
+
+<!-- inline: core.js -->
+<!-- inline: checker.js -->
+<!-- inline: maps.js -->
+<!-- inline: ui.js -->
+</body>
+</html>
