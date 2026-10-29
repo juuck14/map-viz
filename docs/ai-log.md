@@ -65,3 +65,93 @@ errors found in AI output and how they were fixed. Newest entries at the bottom.
 - [ ] Try the page with one or two people from the target audience. Note where they get
       confused.
 - [ ] Decide what to submit on Nov 1: the `dist/index.html` file, a link, or both.
+
+## 2026-10-29 — session 2: generated maps, seven algorithms, process views
+
+**Prompt (summary).** The maps should be far more complex and varied; the current maps are
+ugly; can the computation itself be visualized; can more algorithms be added?
+
+**What changed.**
+
+- **Generated maps.**
+  - The hand-drawn letter-grid maps were replaced by a generator (`tools/generate-maps.mjs`).
+    It works from Voronoi cells of Poisson-disc points, with noise-based land and regions
+    grown at uneven speeds.
+  - There are eight maps, from 6 to 62 regions: one island, an archipelago, a ragged coast,
+    two lands joined by an isthmus, and a dense patchwork.
+  - The lesson maps are found by seed search. "Five around one" must form a wheel. The
+    "Greedy trap" must get alphabetical greedy stuck and be repaired by backtracking.
+- **New look.**
+  - Atlas style: ocean gradient with shallow-water bands, land shadow, paper grain,
+    smoothed shared borders (thin inside, stronger at the coast), and labels sized to
+    each region.
+  - The palette is a muted 4-color set chosen with the dataviz validator, separately for
+    light and dark mode.
+- **Seven algorithms:** Greedy, DSATUR, Peeling (smallest-last), Kempe chains (greedy with
+  Kempe-chain repairs), Backtracking, Forward checking (fixed order or "most constrained
+  first"), and Local search (min-conflicts).
+- **"Under the hood".**
+  - A timeline of every region's color at every step.
+  - A growing search tree for the backtracking variants.
+  - Free colors per decision, neighbors left per removal (with Euler's bound), and
+    clashes over time.
+  - On the map: Kempe chains, forward-checking eliminations, "colors left" squares,
+    peeled-off regions, and markers where regions touch at a point.
+- **Checker.** The checker now uses the neighbor list the generator records from the
+  Voronoi cells, independent of the page's shape-based neighbor detection.
+
+**Errors and wrong turns found in AI-generated work, and fixes.**
+
+1. **Kempe chains never fired.** The first design was "peel, then color back with Kempe
+   swaps when stuck". Measuring showed that on every map peeling never removes a region
+   with more than 3 neighbors left. So coloring back never gets stuck, and the Kempe code
+   never ran. It was redesigned as greedy in a chosen order with Kempe repairs. That
+   design needs 1–6 swaps on the maps where greedy fails.
+2. **Forward checking never backtracked.** With "most constrained first" it solved every
+   map with zero backtracks, so its look-ahead was invisible. It now also accepts the
+   fixed orders. With the same order as backtracking, it cuts thousands of backtracks to
+   tens.
+3. **No seed was accepted for "Four corners".** The acceptance rule expected one
+   point-contact pair, but squeezing a border to a point always creates two: both
+   diagonal pairs. The rule and the map note were fixed.
+4. **Scalloped coastlines.** Smoothing Voronoi corners left a regular bump at every cell.
+   Now each chain is relaxed toward its neighbors' midpoints first, and fractal detail is
+   added afterwards.
+5. **The face on the other side of a border was guessed** from the corner's face sets,
+   which is ambiguous for one-edge borders. The tracer now records the face across every
+   edge.
+6. **Enclave cleanup could flood the sea.** When a region had an inner ring, the code
+   merged everything on the other side of that ring into the region. If the other side
+   was sea (−1), every sea cell would have joined it. Sea is now skipped, and such seeds
+   are rejected.
+7. **Dark palette.** Darkening the light palette made green and ochre indistinguishable
+   for protanopia (ΔE 2.8). A grid search over OKLCH lightness, run through the
+   validator, found a passing set (worst ΔE 10.0).
+8. **Chart and overlay fixes.**
+   - The peeling chart drew regions removed with 0 neighbors left in red, as if they
+     were failures.
+   - "Colors left" squares were shown on peeled-off regions.
+   - The search tree's root sat at the top center instead of above the first choice.
+   - All three were found on screenshots and fixed.
+
+**Verification.**
+
+- 184 tests pass.
+- Six bugs were planted in a copy of `core.js`, and each was caught by 6 to 61 failing
+  tests:
+  - a Kempe swap that misses a region;
+  - forward checking that forgets to restore lists;
+  - local search that prefers worse moves;
+  - peeling that removes the most connected region;
+  - a wrong DSATUR tie-break;
+  - point contacts counted as neighbors.
+- The headless-browser smoke test runs all 7 algorithms on all 8 maps without errors.
+
+**Still to do by a human.**
+
+- [ ] Re-trace the new golden examples in `test/golden.test.js` by hand. The neighbor
+      lists are at the top of that file. The AI traced them before running the code, and
+      they matched, but the proposal promises human traces.
+- [ ] Decide whether 8 maps and 7 algorithms is too much for a 4-minute demo. A possible
+      route: "Four corners" (rules) → "Greedy trap" (Greedy → Kempe → Backtracking) →
+      "Patchwork" (Backtracking vs Forward checking, search tree).

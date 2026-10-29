@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Map Coloring, Step by Step</title>
-<meta name="description" content="An interactive look at how greedy coloring, DSATUR and backtracking choose colors for a map, and what happens when a coloring attempt gets stuck.">
+<meta name="description" content="An interactive look at how seven coloring algorithms choose colors for a map, get stuck, and recover, with the computation drawn as it happens.">
 <!-- inline: style.css -->
 </head>
 <body>
@@ -14,32 +14,59 @@
   <p class="lede">
     Four colors are always enough to color a map so that neighboring regions differ.
     Knowing that does not tell you which color to choose next. Color a map yourself,
-    then watch three strategies make their choices, get stuck, and recover.
+    then watch seven strategies make their choices, get stuck, and recover.
   </p>
 </header>
 
 <main class="layout">
   <section class="stage" aria-label="Map">
     <div class="map-bar">
-      <div class="seg" id="map-tabs" role="tablist" aria-label="Choose a map"></div>
-      <label class="switch">
-        <input type="checkbox" id="show-graph">
-        <span class="switch-track" aria-hidden="true"></span>
-        <span>Show as graph</span>
-      </label>
+      <div class="chips" id="map-tabs" role="tablist" aria-label="Choose a map"></div>
     </div>
-    <div class="map-frame">
+    <div class="map-frame" id="map-frame">
       <svg id="map" role="img" aria-labelledby="map-title"><title id="map-title">Map</title></svg>
+      <div class="map-tools">
+        <label class="switch">
+          <input type="checkbox" id="show-graph">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Graph</span>
+        </label>
+        <label class="switch">
+          <input type="checkbox" id="show-left">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span>Colors left</span>
+        </label>
+      </div>
     </div>
     <div class="legend" aria-label="Colors">
       <span class="legend-item"><i class="sw c1"></i>1 blue</span>
-      <span class="legend-item"><i class="sw c2"></i>2 yellow</span>
-      <span class="legend-item"><i class="sw c3"></i>3 pink</span>
+      <span class="legend-item"><i class="sw c2"></i>2 ochre</span>
+      <span class="legend-item"><i class="sw c3"></i>3 rose</span>
       <span class="legend-item"><i class="sw c4"></i>4 green</span>
-      <span class="legend-item legend-conflict"><i class="sw-conflict"></i>same color on both sides</span>
+      <span class="legend-item"><i class="sw-conflict"></i>same color on both sides</span>
+      <span class="legend-item"><i class="sw-contact"></i>regions touch at a point only</span>
     </div>
     <p class="inspector" id="inspector" aria-live="polite"></p>
     <p class="map-note" id="map-note"></p>
+
+    <section class="process" id="process" aria-label="How the run unfolds">
+      <div class="process-head">
+        <h2>Under the hood</h2>
+        <p id="process-caption"></p>
+      </div>
+      <div class="process-body">
+        <figure class="chart">
+          <figcaption id="timeline-title">Timeline</figcaption>
+          <div class="canvas-box" id="timeline-box"><canvas id="timeline"></canvas></div>
+          <p class="chart-note" id="timeline-note"></p>
+        </figure>
+        <figure class="chart">
+          <figcaption id="detail-title"></figcaption>
+          <div class="canvas-box" id="detail-box"><canvas id="detail"></canvas></div>
+          <p class="chart-note" id="detail-note"></p>
+        </figure>
+      </div>
+    </section>
   </section>
 
   <aside class="panel" aria-label="Controls">
@@ -59,11 +86,7 @@
     </section>
 
     <section id="algo-panel" class="mode-panel">
-      <div class="seg" id="algo-tabs" role="tablist" aria-label="Algorithm">
-        <button role="tab" data-algo="greedy">Greedy</button>
-        <button role="tab" data-algo="dsatur">DSATUR</button>
-        <button role="tab" data-algo="backtrack">Backtracking</button>
-      </div>
+      <div class="chips algo-chips" id="algo-tabs" role="tablist" aria-label="Algorithm"></div>
       <p class="algo-desc" id="algo-desc"></p>
 
       <div class="order-row" id="order-row">
@@ -82,10 +105,11 @@
         <button class="btn icon" id="to-end" title="Last step (End)" aria-label="Last step">⏭</button>
         <label class="speed">Speed
           <select id="speed">
-            <option value="0.5">slow</option>
-            <option value="1.25" selected>normal</option>
-            <option value="4">fast</option>
-            <option value="25">very fast</option>
+            <option value="0.6">slow</option>
+            <option value="1.5" selected>normal</option>
+            <option value="5">fast</option>
+            <option value="30">very fast</option>
+            <option value="250">fastest</option>
           </select>
         </label>
       </div>
@@ -116,16 +140,23 @@
       crosses the border it stands for.</p>
   </section>
   <section>
+    <h2>The maps</h2>
+    <p>The maps are generated: random points are turned into Voronoi cells, noise decides
+      which cells are land, and regions grow from seeds across the land. Shared borders are
+      stored once, so both neighbors use exactly the same line.</p>
+  </section>
+  <section>
     <h2>Checking</h2>
-    <p>Neighbors are found from the shapes themselves: two borders must overlap along a segment.
-      A separate checker reads neighbors directly from the grid each map is drawn on, and
+    <p>The page finds neighbors from the drawn shapes: two borders must overlap along a segment.
+      A separate checker uses the neighbor list the generator recorded from the Voronoi cells, and
       re-checks every finished coloring shown here.</p>
   </section>
 </footer>
 
 <!-- inline: core.js -->
 <!-- inline: checker.js -->
-<!-- inline: maps.js -->
+<!-- inline: maps-data.js -->
+<!-- inline: charts.js -->
 <!-- inline: ui.js -->
 </body>
 </html>

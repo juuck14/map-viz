@@ -1,7 +1,7 @@
 /*
- * Map coloring core: map geometry, adjacency, and step-by-step traces of
+ * Map coloring core: map geometry, neighbors, and step-by-step traces of
  * coloring algorithms. No DOM access, so the same file runs in the browser
- * (as window.MapCore) and in Node tests (via require).
+ * (as window.MapCore) and in Node (tests and the map generator).
  */
 (function (root, factory) {
   const api = factory();
@@ -11,189 +11,77 @@
   'use strict';
 
   const NUM_COLORS = 4;
-  const SEA = '.';
+  const FULL = (1 << NUM_COLORS) - 1;
+  const bit = (c) => 1 << (c - 1);
+  const popcount = (m) => ((m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1));
+  const round1 = (v) => Math.round(v * 10) / 10;
 
   // ---------------------------------------------------------------------------
-  // Map geometry
+  // Maps
   //
-  // A map is authored as a grid of letters (one letter per region, '.' for sea).
-  // Grid corners are jittered and every border is smoothed, so the regions look
-  // hand drawn while two neighbors still share exactly the same border points.
+  // A map's borders are stored as arcs: each border between two regions (or a
+  // region and the sea) is one polyline, shared by both sides. A region lists
+  // its arcs in clockwise order; ~k means arc k walked backwards.
   // ---------------------------------------------------------------------------
 
-  // Deterministic value in [0, 1) for a grid corner, so a map always looks the same.
-  function noise(seed, i, j, k) {
-    let h = Math.imul(seed ^ 0x9e3779b9, 0x85ebca6b);
-    h = Math.imul(h ^ (i + 0x165667b1), 0xc2b2ae35);
-    h ^= h >>> 15;
-    h = Math.imul(h ^ (j + 0x27d4eb2f), 0x85ebca6b);
-    h ^= h >>> 13;
-    h = Math.imul(h ^ (k + 0x9e3779b1), 0xc2b2ae35);
-    h ^= h >>> 16;
-    return (h >>> 0) / 4294967296;
-  }
-
-  function parseGrid(rows) {
-    const H = rows.length;
-    const W = Math.max(...rows.map((r) => r.length));
-    const at = (i, j) => (i < 0 || j < 0 || i >= H || j >= W ? SEA : rows[i][j] || SEA);
-    return { H, W, at };
-  }
-
-  const round2 = (v) => Math.round(v * 100) / 100;
-
-  // Chaikin corner cutting on an open chain; the two end points stay fixed.
-  // The rule is symmetric, so smoothing a chain forwards or backwards gives the
-  // same points. That keeps a shared border identical for both of its regions.
-  function chaikinOpen(points, iterations) {
-    let pts = points;
-    for (let it = 0; it < iterations; it++) {
-      const out = [pts[0]];
-      for (let k = 0; k < pts.length - 1; k++) {
-        const [ax, ay] = pts[k];
-        const [bx, by] = pts[k + 1];
-        out.push([0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by]);
-        out.push([0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by]);
-      }
-      out.push(pts[pts.length - 1]);
-      pts = out;
+  function decodeArc(flat) {
+    const pts = [];
+    let x = 0;
+    let y = 0;
+    for (let i = 0; i < flat.length; i += 2) {
+      x = i === 0 ? flat[0] : x + flat[i];
+      y = i === 0 ? flat[1] : y + flat[i + 1];
+      pts.push([x / 10, y / 10]);
     }
     return pts;
   }
 
-  function chaikinClosed(points, iterations) {
-    let pts = points;
-    for (let it = 0; it < iterations; it++) {
-      const out = [];
-      for (let k = 0; k < pts.length; k++) {
-        const [ax, ay] = pts[k];
-        const [bx, by] = pts[(k + 1) % pts.length];
-        out.push([0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by]);
-        out.push([0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by]);
+  function buildMap(data) {
+    const arcs = data.arcs.map(decodeArc);
+    const users = arcs.map(() => []);
+    const regions = data.regions.map((r, ri) => {
+      const polygon = [];
+      for (const ref of r.arcs) {
+        const k = ref < 0 ? ~ref : ref;
+        users[k].push(ri);
+        const pts = ref < 0 ? arcs[k].slice().reverse() : arcs[k];
+        polygon.push(...pts.slice(0, -1));
       }
-      pts = out;
-    }
-    return pts;
-  }
-
-  // Build drawable regions from a map spec:
-  // { id, title, grid: [...rows], cell, margin, jitter, smooth, seed }
-  function buildMap(spec) {
-    const { H, W, at } = parseGrid(spec.grid);
-    const cell = spec.cell || 40;
-    const margin = spec.margin == null ? cell * 0.6 : spec.margin;
-    const jitter = spec.jitter == null ? 0.25 : spec.jitter;
-    const smooth = spec.smooth == null ? 2 : spec.smooth;
-    const seed = spec.seed || 1;
-
-    const corner = (i, j) => [
-      margin + j * cell + (noise(seed, i, j, 0) - 0.5) * 2 * jitter * cell,
-      margin + i * cell + (noise(seed, i, j, 1) - 0.5) * 2 * jitter * cell,
-    ];
-    // A corner where three or more faces (regions or sea) meet is a junction.
-    // Junctions are never moved by smoothing; four-region junctions are the
-    // points where two regions touch without being neighbors.
-    const isJunction = (i, j) =>
-      new Set([at(i - 1, j - 1), at(i - 1, j), at(i, j - 1), at(i, j)]).size >= 3;
-
-    const ids = [];
-    for (let i = 0; i < H; i++)
-      for (let j = 0; j < W; j++) {
-        const c = at(i, j);
-        if (c !== SEA && !ids.includes(c)) ids.push(c);
-      }
-    ids.sort();
-
-    const regions = ids.map((id) => {
-      // Directed boundary edges, clockwise on screen (y grows downwards).
-      const next = new Map();
-      const add = (a, b) => {
-        const key = a.join(',');
-        if (next.has(key)) {
-          throw new Error(`Map "${spec.id}": region ${id} touches itself at corner (${key}).`);
-        }
-        next.set(key, b);
-      };
-      for (let i = 0; i < H; i++)
-        for (let j = 0; j < W; j++) {
-          if (at(i, j) !== id) continue;
-          if (at(i - 1, j) !== id) add([i, j], [i, j + 1]);
-          if (at(i, j + 1) !== id) add([i, j + 1], [i + 1, j + 1]);
-          if (at(i + 1, j) !== id) add([i + 1, j + 1], [i + 1, j]);
-          if (at(i, j - 1) !== id) add([i + 1, j], [i, j]);
-        }
-      // Follow the edges once around; a simple region uses all of them.
-      const startKey = next.keys().next().value;
-      const cycle = [];
-      let key = startKey;
-      do {
-        const [i, j] = key.split(',').map(Number);
-        cycle.push([i, j]);
-        key = next.get(key).join(',');
-      } while (key !== startKey && cycle.length <= next.size);
-      if (cycle.length !== next.size) {
-        throw new Error(`Map "${spec.id}": region ${id} is not one piece without holes.`);
-      }
-
-      // Smooth each border chain between junctions separately.
-      const junctions = [];
-      cycle.forEach(([i, j], k) => {
-        if (isJunction(i, j)) junctions.push(k);
-      });
-      let polygon;
-      if (junctions.length === 0) {
-        polygon = chaikinClosed(cycle.map(([i, j]) => corner(i, j)), smooth);
-      } else {
-        const rotated = cycle.slice(junctions[0]).concat(cycle.slice(0, junctions[0]));
-        polygon = [];
-        let chain = [rotated[0]];
-        for (let k = 1; k <= rotated.length; k++) {
-          const c = rotated[k % rotated.length];
-          chain.push(c);
-          if (isJunction(c[0], c[1])) {
-            const pts = chaikinOpen(chain.map(([i, j]) => corner(i, j)), smooth);
-            polygon.push(...pts.slice(0, -1));
-            chain = [c];
-          }
-        }
-      }
-      polygon = polygon.map(([x, y]) => [round2(x), round2(y)]);
-      return { id, polygon, cells: countCells(at, H, W, id) };
+      return { id: r.id, polygon };
     });
-
-    // Frame the land with a little room for labels, instead of the whole grid.
+    regions.forEach((r, ri) => {
+      r.area = Math.abs(signedArea(r.polygon));
+      // The generator stores label points; compute them only if missing.
+      const stored = data.regions[ri];
+      const lab = stored.label ? { point: stored.label, clearance: stored.clearance } : labelPoint(r.polygon);
+      r.label = lab.point;
+      r.clearance = lab.clearance;
+      r.path = 'M' + r.polygon.map(([x, y]) => `${x},${y}`).join('L') + 'Z';
+    });
     const xs = regions.flatMap((r) => r.polygon.map((p) => p[0]));
     const ys = regions.flatMap((r) => r.polygon.map((p) => p[1]));
-    const pad = cell * 0.6;
-    const map = {
-      id: spec.id,
-      title: spec.title,
-      viewBox: [
-        Math.min(...xs) - pad,
-        Math.min(...ys) - pad,
-        Math.max(...xs) - Math.min(...xs) + 2 * pad,
-        Math.max(...ys) - Math.min(...ys) + 2 * pad,
-      ].map(round2),
-      ids,
+    const pad = 28;
+    const minX = Math.min(...xs) - pad;
+    const minY = Math.min(...ys) - pad;
+    return {
+      id: data.id,
+      title: data.title,
+      note: data.note,
+      ids: regions.map((r) => r.id),
       regions,
-      spec,
+      arcs: arcs.map((pts, k) => ({ pts, users: users[k], coast: users[k].length === 1 })),
+      viewBox: [minX, minY, Math.max(...xs) + pad - minX, Math.max(...ys) + pad - minY].map(round1),
+      data,
     };
-    for (const r of regions) {
-      r.label = (spec.labels && spec.labels[r.id]) || labelPoint(r.polygon, cell / 8);
-      r.path = 'M' + r.polygon.map(([x, y]) => `${x},${y}`).join('L') + 'Z';
+  }
+
+  function signedArea(polygon) {
+    let s = 0;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      s += polygon[j][0] * polygon[i][1] - polygon[i][0] * polygon[j][1];
     }
-    return map;
+    return s / 2;
   }
-
-  function countCells(at, H, W, id) {
-    let n = 0;
-    for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) if (at(i, j) === id) n++;
-    return n;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Polygon helpers
-  // ---------------------------------------------------------------------------
 
   function pointInPolygon(x, y, polygon) {
     let inside = false;
@@ -217,43 +105,53 @@
   function distToBoundary(x, y, polygon) {
     let best = Infinity;
     for (let a = 0, b = polygon.length - 1; a < polygon.length; b = a++) {
-      best = Math.min(best, distToSegment(x, y, ...polygon[b], ...polygon[a]));
+      best = Math.min(best, distToSegment(x, y, polygon[b][0], polygon[b][1], polygon[a][0], polygon[a][1]));
     }
     return best;
   }
 
-  // The interior point farthest from the border: where the label (and the
-  // graph vertex) goes. A coarse scan followed by a fine one is plenty here.
-  function labelPoint(polygon, step) {
+  // The interior point farthest from the border (where the label and the graph
+  // vertex go): a coarse grid, then a few rounds of refinement around the best.
+  function labelPoint(polygon) {
     const xs = polygon.map((p) => p[0]);
     const ys = polygon.map((p) => p[1]);
-    let best = null;
-    let bestD = -1;
-    const scan = (x0, x1, y0, y1, s) => {
-      for (let x = x0; x <= x1; x += s)
-        for (let y = y0; y <= y1; y += s) {
-          if (!pointInPolygon(x, y, polygon)) continue;
-          const d = distToBoundary(x, y, polygon);
-          if (d > bestD) {
-            bestD = d;
-            best = [x, y];
+    const x0 = Math.min(...xs);
+    const y0 = Math.min(...ys);
+    const w = Math.max(...xs) - x0;
+    const h = Math.max(...ys) - y0;
+    let step = Math.max(w, h) / 24;
+    let cands = [];
+    for (let x = x0 + step / 2; x < x0 + w; x += step)
+      for (let y = y0 + step / 2; y < y0 + h; y += step) {
+        if (pointInPolygon(x, y, polygon)) cands.push([x, y, distToBoundary(x, y, polygon)]);
+      }
+    if (!cands.length) cands.push([polygon[0][0], polygon[0][1], 0]);
+    for (let round = 0; round < 4; round++) {
+      cands.sort((a, b) => b[2] - a[2]);
+      const top = cands.slice(0, 4);
+      step /= 3;
+      const next = top.slice();
+      for (const [cx, cy] of top)
+        for (let i = -2; i <= 2; i++)
+          for (let j = -2; j <= 2; j++) {
+            const x = cx + i * step;
+            const y = cy + j * step;
+            if ((i || j) && pointInPolygon(x, y, polygon)) next.push([x, y, distToBoundary(x, y, polygon)]);
           }
-        }
-    };
-    scan(Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys), step);
-    const [bx, by] = best;
-    scan(bx - step, bx + step, by - step, by + step, step / 4);
-    return [round2(best[0]), round2(best[1])];
+      cands = next;
+    }
+    cands.sort((a, b) => b[2] - a[2]);
+    return { point: [round1(cands[0][0]), round1(cands[0][1])], clearance: round1(cands[0][2]) };
   }
 
   // ---------------------------------------------------------------------------
-  // Adjacency: two regions are neighbors exactly when their borders overlap
+  // Neighbors: two regions are neighbors exactly when their borders overlap
   // along a segment of positive length. Touching at a single point does not
-  // count. This works on the polygons alone, for any polygonal map.
+  // count. This looks only at the polygons, not at how the map was made.
   // ---------------------------------------------------------------------------
 
-  const MIN_SHARED = 1e-3; // shortest overlap that counts as a shared segment
-  const ON_LINE = 1e-3; // how far a point may sit from a line and still be on it
+  const MIN_SHARED = 1e-3;
+  const ON_LINE = 1e-3;
 
   function sharedPart(e, f) {
     const dx = e.bx - e.ax;
@@ -262,7 +160,6 @@
     if (len === 0) return null;
     const ux = dx / len;
     const uy = dy / len;
-    // Both ends of f must lie on the line through e.
     const off1 = (f.ax - e.ax) * uy - (f.ay - e.ay) * ux;
     const off2 = (f.bx - e.ax) * uy - (f.by - e.ay) * ux;
     if (Math.abs(off1) > ON_LINE || Math.abs(off2) > ON_LINE) return null;
@@ -274,53 +171,61 @@
     return [e.ax + ux * lo, e.ay + uy * lo, e.ax + ux * hi, e.ay + uy * hi];
   }
 
-  function regionEdges(regions) {
-    const edges = [];
-    regions.forEach((r, ri) => {
-      const p = r.polygon;
-      for (let k = 0; k < p.length; k++) {
-        const [ax, ay] = p[k];
-        const [bx, by] = p[(k + 1) % p.length];
-        edges.push({
-          r: ri,
-          ax, ay, bx, by,
-          minX: Math.min(ax, bx) - ON_LINE,
-          maxX: Math.max(ax, bx) + ON_LINE,
-          minY: Math.min(ay, by) - ON_LINE,
-          maxY: Math.max(ay, by) + ON_LINE,
-        });
-      }
-    });
-    return edges;
-  }
-
   const pairKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
 
   function buildGraph(map) {
     const n = map.regions.length;
-    const edges = regionEdges(map.regions);
-    const borders = {}; // "i|j" -> list of shared segments [x1, y1, x2, y2]
-    for (let a = 0; a < edges.length; a++) {
-      const e = edges[a];
-      for (let b = a + 1; b < edges.length; b++) {
-        const f = edges[b];
-        if (f.r === e.r) continue;
-        if (f.minX > e.maxX || f.maxX < e.minX || f.minY > e.maxY || f.maxY < e.minY) continue;
-        const seg = sharedPart(e, f);
-        if (seg) (borders[pairKey(e.r, f.r)] ||= []).push(seg);
+    const edges = [];
+    map.regions.forEach((r, ri) => {
+      const p = r.polygon;
+      for (let k = 0; k < p.length; k++) {
+        const [ax, ay] = p[k];
+        const [bx, by] = p[(k + 1) % p.length];
+        edges.push({ r: ri, ax, ay, bx, by, x0: Math.min(ax, bx), x1: Math.max(ax, bx), y0: Math.min(ay, by), y1: Math.max(ay, by) });
+      }
+    });
+
+    // Compare only edges that fall in the same bucket of a coarse grid. A pair
+    // is handled in the one bucket that holds the corner of their overlap.
+    const CELL = 32;
+    const buckets = new Map();
+    const bucketOf = (x, y) => `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
+    edges.forEach((e, id) => {
+      for (let gx = Math.floor((e.x0 - ON_LINE) / CELL); gx <= Math.floor((e.x1 + ON_LINE) / CELL); gx++)
+        for (let gy = Math.floor((e.y0 - ON_LINE) / CELL); gy <= Math.floor((e.y1 + ON_LINE) / CELL); gy++) {
+          const key = `${gx},${gy}`;
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(id);
+        }
+    });
+    const found = {};
+    for (const [key, ids] of buckets) {
+      for (let a = 0; a < ids.length; a++) {
+        const e = edges[ids[a]];
+        for (let b = a + 1; b < ids.length; b++) {
+          const f = edges[ids[b]];
+          if (f.r === e.r) continue;
+          if (f.x0 > e.x1 + ON_LINE || f.x1 < e.x0 - ON_LINE || f.y0 > e.y1 + ON_LINE || f.y1 < e.y0 - ON_LINE) continue;
+          if (bucketOf(Math.max(e.x0, f.x0) - ON_LINE, Math.max(e.y0, f.y0) - ON_LINE) !== key) continue;
+          const seg = sharedPart(e, f);
+          if (!seg) continue;
+          const first = e.r < f.r ? ids[a] : ids[b];
+          (found[pairKey(e.r, f.r)] ||= []).push([first, seg]);
+        }
       }
     }
 
     const neighbors = Array.from({ length: n }, () => []);
-    for (const key of Object.keys(borders)) {
+    const borders = {};
+    for (const [key, list] of Object.entries(found)) {
       const [i, j] = key.split('|').map(Number);
       neighbors[i].push(j);
       neighbors[j].push(i);
+      // In the order they appear around the lower-numbered region.
+      borders[key] = list.sort((x, y) => x[0] - y[0]).map((x) => x[1]);
     }
     neighbors.forEach((list) => list.sort((a, b) => a - b));
 
-    // Regions that share a corner point but no border: shown to the reader as
-    // "touches only at a point".
     const cornerOwners = new Map();
     map.regions.forEach((r, ri) => {
       for (const [x, y] of r.polygon) {
@@ -330,33 +235,31 @@
       }
     });
     const pointContacts = Array.from({ length: n }, () => []);
-    for (const owners of cornerOwners.values()) {
-      const list = [...owners];
-      for (const i of list)
-        for (const j of list)
-          if (i !== j && !neighbors[i].includes(j) && !pointContacts[i].includes(j)) {
-            pointContacts[i].push(j);
+    const contactPoints = []; // where regions touch without being neighbors
+    for (const [key, owners] of cornerOwners) {
+      let touching = false;
+      for (const i of owners)
+        for (const j of owners)
+          if (i !== j && !neighbors[i].includes(j)) {
+            touching = true;
+            if (!pointContacts[i].includes(j)) pointContacts[i].push(j);
           }
+      if (touching) contactPoints.push({ at: key.split(',').map(Number), regions: [...owners].sort((a, b) => a - b) });
     }
     pointContacts.forEach((list) => list.sort((a, b) => a - b));
 
-    // Shared borders as polylines, and the point where a graph edge crosses
-    // each border: halfway along the longest stretch.
     const borderLines = {};
     const crossing = {};
     for (const [key, segs] of Object.entries(borders)) {
       const lines = joinSegments(segs);
       borderLines[key] = lines;
       const longest = lines.reduce((a, b) => (polylineLength(a) >= polylineLength(b) ? a : b));
-      crossing[key] = pointAlong(longest, polylineLength(longest) / 2).map(round2);
+      crossing[key] = pointAlong(longest, polylineLength(longest) / 2).map(round1);
     }
 
-    return { n, ids: map.ids, neighbors, borders, borderLines, crossing, pointContacts };
+    return { n, ids: map.ids, neighbors, borders, borderLines, crossing, pointContacts, contactPoints };
   }
 
-  // Chain segments that meet end to start into polylines. The segments of one
-  // border arrive in the order they appear around a polygon, so one pass plus
-  // a wrap-around join is enough.
   function joinSegments(segs) {
     const same = (p, q) => Math.abs(p[0] - q[0]) < ON_LINE && Math.abs(p[1] - q[1]) < ON_LINE;
     const lines = [];
@@ -378,9 +281,7 @@
 
   function polylineLength(line) {
     let len = 0;
-    for (let k = 1; k < line.length; k++) {
-      len += Math.hypot(line[k][0] - line[k - 1][0], line[k][1] - line[k - 1][1]);
-    }
+    for (let k = 1; k < line.length; k++) len += Math.hypot(line[k][0] - line[k - 1][0], line[k][1] - line[k - 1][1]);
     return len;
   }
 
@@ -396,7 +297,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Vertex orders for greedy coloring and backtracking
+  // Visiting orders for greedy and backtracking
   // ---------------------------------------------------------------------------
 
   function mulberry32(seed) {
@@ -410,30 +311,23 @@
     };
   }
 
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+
   const ORDERS = {
-    alphabetical: {
-      label: 'Alphabetical',
-      make: (map, graph) => graph.ids.map((_, i) => i),
-    },
+    alphabetical: { label: 'Alphabetical', make: (map, graph) => range(graph.n) },
     leftToRight: {
       label: 'Left to right',
-      make: (map) =>
-        map.regions
-          .map((r, i) => i)
-          .sort((a, b) => map.regions[a].label[0] - map.regions[b].label[0] || a - b),
+      make: (map, graph) => range(graph.n).sort((a, b) => map.regions[a].label[0] - map.regions[b].label[0] || a - b),
     },
     mostNeighbors: {
       label: 'Most neighbors first',
-      make: (map, graph) =>
-        graph.ids
-          .map((_, i) => i)
-          .sort((a, b) => graph.neighbors[b].length - graph.neighbors[a].length || a - b),
+      make: (map, graph) => range(graph.n).sort((a, b) => graph.neighbors[b].length - graph.neighbors[a].length || a - b),
     },
     random: {
       label: 'Random',
       make: (map, graph, seed) => {
         const rand = mulberry32(seed || 1);
-        const order = graph.ids.map((_, i) => i);
+        const order = range(graph.n);
         for (let k = order.length - 1; k > 0; k--) {
           const m = Math.floor(rand() * (k + 1));
           [order[k], order[m]] = [order[m], order[k]];
@@ -446,170 +340,465 @@
   // ---------------------------------------------------------------------------
   // Algorithm traces
   //
-  // Each algorithm records every decision as a step. A step carries a full
-  // snapshot (colors 0 = uncolored, 1..4), so the page can move backwards and
-  // forwards freely without re-running anything.
+  // Each algorithm records every decision as a step with a full snapshot of
+  // the colors (0 = uncolored, 1..4), so the page can move backwards and
+  // forwards freely. Sets of colors are bit masks: color c is bit c-1.
   // ---------------------------------------------------------------------------
 
-  // Colors that region v may take: not used by a colored neighbor and not
-  // already tried at this point of the search.
-  function colorOptions(graph, colors, v, tried) {
-    const blockers = {};
-    for (let c = 1; c <= NUM_COLORS; c++) blockers[c] = [];
+  function colorOptions(graph, colors, v, triedMask) {
+    const blockers = [null, [], [], [], []];
     for (const u of graph.neighbors[v]) if (colors[u]) blockers[colors[u]].push(u);
     const available = [];
     for (let c = 1; c <= NUM_COLORS; c++) {
-      if (blockers[c].length === 0 && !(tried && tried.includes(c))) available.push(c);
+      if (blockers[c].length === 0 && !(triedMask & bit(c))) available.push(c);
     }
     return { available, blockers };
   }
 
-  const countColors = (colors) => new Set(colors.filter((c) => c > 0)).size;
+  function countColors(colors) {
+    let m = 0;
+    for (const c of colors) if (c) m |= bit(c);
+    return popcount(m);
+  }
 
-  // Greedy: visit regions in a fixed order and give each the smallest color not
-  // used by a neighbor. A choice is never revised, so the run can get stuck.
+  function countConflicts(graph, colors) {
+    let k = 0;
+    for (let v = 0; v < graph.n; v++) for (const u of graph.neighbors[v]) if (u > v && colors[u] && colors[u] === colors[v]) k++;
+    return k;
+  }
+
+  // Greedy: visit regions in a fixed order; each takes the lowest color no
+  // neighbor has. A choice is never revised, so the run can get stuck.
   function greedyTrace(graph, order) {
-    const colors = new Array(graph.n).fill(0);
-    const setAt = new Array(graph.n).fill(-1); // step at which each color was chosen
-    const steps = [{ kind: 'start', colors: colors.slice(), setAt: setAt.slice() }];
+    const colors = new Uint8Array(graph.n);
+    const steps = [{ kind: 'start', colors: colors.slice() }];
     for (let pos = 0; pos < order.length; pos++) {
       const v = order[pos];
-      const { available, blockers } = colorOptions(graph, colors, v, null);
-      if (available.length === 0) {
-        steps.push({ kind: 'stuck', v, pos, blockers, colors: colors.slice(), setAt: setAt.slice() });
+      const { available, blockers } = colorOptions(graph, colors, v, 0);
+      if (!available.length) {
+        steps.push({ kind: 'stuck', v, pos, blockers, colors: colors.slice() });
         return { algorithm: 'greedy', order, steps, success: false };
       }
       colors[v] = available[0];
-      setAt[v] = steps.length;
-      steps.push({
-        kind: 'assign', v, pos, color: available[0], available, blockers,
-        colors: colors.slice(), setAt: setAt.slice(),
-      });
+      steps.push({ kind: 'assign', v, pos, color: available[0], available, blockers, colors: colors.slice() });
     }
-    steps.push({ kind: 'done', colors: colors.slice(), setAt: setAt.slice(), used: countColors(colors) });
+    steps.push({ kind: 'done', colors: colors.slice(), used: countColors(colors) });
     return { algorithm: 'greedy', order, steps, success: true };
   }
 
   // DSATUR (Brélaz 1979): next, color the region whose colored neighbors show
-  // the most different colors. Ties go to the region with the most uncolored
-  // neighbors, then to the earlier letter. Like greedy, it never revises.
-  function dsaturTrace(graph) {
-    const n = graph.n;
-    const colors = new Array(n).fill(0);
-    const setAt = new Array(n).fill(-1);
-    const order = [];
-    const scores = () =>
-      colors.map((c, v) => {
-        if (c) return null;
-        const seen = new Set();
-        let free = 0;
-        for (const u of graph.neighbors[v]) {
-          if (colors[u]) seen.add(colors[u]);
-          else free++;
-        }
-        return { saturation: seen.size, free };
-      });
-    const steps = [{ kind: 'start', colors: colors.slice(), setAt: setAt.slice(), scores: scores() }];
-    for (let pos = 0; pos < n; pos++) {
-      const sc = scores();
-      let v = -1;
-      for (let u = 0; u < n; u++) {
-        if (!sc[u]) continue;
-        if (
-          v < 0 ||
-          sc[u].saturation > sc[v].saturation ||
-          (sc[u].saturation === sc[v].saturation && sc[u].free > sc[v].free)
-        ) {
-          v = u;
-        }
+  // the most different colors. Ties: most uncolored neighbors, then the
+  // earlier letter. Never revises a choice.
+  function dsaturScores(graph, colors) {
+    return Array.from(colors, (c, v) => {
+      if (c) return null;
+      let seen = 0;
+      let free = 0;
+      for (const u of graph.neighbors[v]) {
+        if (colors[u]) seen |= bit(colors[u]);
+        else free++;
       }
-      // Why v won: 'saturation', 'free' (tie on saturation), or 'letter' (full tie).
+      return { saturation: popcount(seen), free };
+    });
+  }
+
+  function dsaturTrace(graph) {
+    const colors = new Uint8Array(graph.n);
+    const order = [];
+    const steps = [{ kind: 'start', colors: colors.slice() }];
+    for (let pos = 0; pos < graph.n; pos++) {
+      const sc = dsaturScores(graph, colors);
+      let v = -1;
+      for (let u = 0; u < graph.n; u++) {
+        if (!sc[u]) continue;
+        if (v < 0 || sc[u].saturation > sc[v].saturation || (sc[u].saturation === sc[v].saturation && sc[u].free > sc[v].free)) v = u;
+      }
       const rivals = sc.filter((s, u) => s && u !== v && s.saturation === sc[v].saturation);
-      const reason = rivals.length === 0
-        ? 'saturation'
-        : rivals.every((s) => s.free < sc[v].free) ? 'free' : 'letter';
+      const reason = !rivals.length ? 'saturation' : rivals.every((s) => s.free < sc[v].free) ? 'free' : 'letter';
       order.push(v);
-      const { available, blockers } = colorOptions(graph, colors, v, null);
-      if (available.length === 0) {
-        steps.push({ kind: 'stuck', v, pos, blockers, scores: sc, reason, colors: colors.slice(), setAt: setAt.slice() });
+      const { available, blockers } = colorOptions(graph, colors, v, 0);
+      if (!available.length) {
+        steps.push({ kind: 'stuck', v, pos, blockers, score: sc[v], reason, colors: colors.slice() });
         return { algorithm: 'dsatur', order, steps, success: false };
       }
       colors[v] = available[0];
-      setAt[v] = steps.length;
-      steps.push({
-        kind: 'assign', v, pos, color: available[0], available, blockers, scores: sc, reason,
-        colors: colors.slice(), setAt: setAt.slice(),
-      });
+      steps.push({ kind: 'assign', v, pos, color: available[0], available, blockers, score: sc[v], reason, colors: colors.slice() });
     }
-    steps.push({ kind: 'done', colors: colors.slice(), setAt: setAt.slice(), used: countColors(colors) });
+    steps.push({ kind: 'done', colors: colors.slice(), used: countColors(colors) });
     return { algorithm: 'dsatur', order, steps, success: true };
   }
 
-  // Backtracking: like greedy, but when a region has no color left, go back to
-  // the previous region in the order and give it its next untried color.
-  // This search always finds a four-coloring when one exists.
-  function backtrackTrace(graph, order, maxSteps = 5000) {
+  // Backtracking: like greedy, but at a dead end go back to the previous
+  // region in the order and give it its next untried color. Finds a
+  // four-coloring whenever one exists (given enough steps).
+  //
+  // The search tree is recorded too: one node per color tried, plus a leaf
+  // for each dead end. step.cur is the deepest node on the current path.
+  function backtrackTrace(graph, order, maxSteps = 20000) {
     const n = graph.n;
-    const colors = new Array(n).fill(0);
-    const setAt = new Array(n).fill(-1);
-    const tried = Array.from({ length: n }, () => []);
+    const colors = new Uint8Array(n);
+    const tried = new Uint8Array(n);
+    const nodes = [];
+    const nodeAt = new Int32Array(n).fill(-1); // node of the color set at each position
     let backtracks = 0;
-    const snap = (extra) => ({
-      ...extra,
-      colors: colors.slice(),
-      setAt: setAt.slice(),
-      tried: tried.map((t) => t.slice()),
-      backtracks,
-    });
+    let cur = -1;
+    const snap = (extra) => ({ ...extra, colors: colors.slice(), tried: tried.slice(), backtracks, cur });
     const steps = [snap({ kind: 'start' })];
     let pos = 0;
     for (;;) {
       if (pos === order.length) {
         steps.push(snap({ kind: 'done', used: countColors(colors) }));
-        return { algorithm: 'backtrack', order, steps, success: true };
+        return { algorithm: 'backtrack', order, steps, nodes, success: true };
       }
       if (steps.length >= maxSteps) {
         steps.push(snap({ kind: 'limit' }));
-        return { algorithm: 'backtrack', order, steps, success: false };
+        return { algorithm: 'backtrack', order, steps, nodes, success: false };
       }
       const v = order[pos];
       const { available, blockers } = colorOptions(graph, colors, v, tried[v]);
-      if (available.length > 0) {
+      if (available.length) {
         colors[v] = available[0];
-        setAt[v] = steps.length;
+        nodes.push({ parent: cur, v, color: available[0], step: steps.length });
+        cur = nodeAt[pos] = nodes.length - 1;
         steps.push(snap({ kind: 'assign', v, pos, color: available[0], available, blockers }));
         pos++;
         continue;
       }
+      nodes.push({ parent: cur, v, color: 0, dead: true, step: steps.length });
       steps.push(snap({ kind: 'deadend', v, pos, blockers }));
-      tried[v] = [];
+      tried[v] = 0;
       if (pos === 0) {
         steps.push(snap({ kind: 'fail' }));
-        return { algorithm: 'backtrack', order, steps, success: false };
+        return { algorithm: 'backtrack', order, steps, nodes, success: false };
       }
       pos--;
       const u = order[pos];
       const old = colors[u];
-      tried[u].push(old);
+      tried[u] |= bit(old);
       colors[u] = 0;
-      setAt[u] = -1;
       backtracks++;
+      nodes[nodeAt[pos]].undone = steps.length;
+      cur = nodes[nodeAt[pos]].parent;
       steps.push(snap({ kind: 'undo', v: u, pos, color: old, from: v }));
+    }
+  }
+
+  // Forward checking: every region keeps a set of colors still possible.
+  // Coloring a region removes its color from the uncolored neighbors' sets. If
+  // some set becomes empty, that choice is undone at once, before any more
+  // regions are colored. The next region is either the next one in a fixed
+  // order, or (order = null) the "most constrained" one: fewest colors left,
+  // then most uncolored neighbors, then the earlier letter.
+  function forwardCheckTrace(graph, order = null, maxSteps = 20000) {
+    const n = graph.n;
+    const colors = new Uint8Array(n);
+    const domains = new Uint8Array(n).fill(FULL);
+    const tried = new Uint8Array(n);
+    const frames = []; // decisions on the current path: { v, color, pruned, node, why }
+    const nodes = [];
+    let backtracks = 0;
+    let cur = -1;
+    const snap = (extra) => ({ ...extra, colors: colors.slice(), domains: domains.slice(), tried: tried.slice(), backtracks, cur, depth: frames.length });
+    const steps = [snap({ kind: 'start' })];
+
+    const choose = () => {
+      if (order) {
+        const v = order.find((u) => !colors[u]);
+        return v === undefined ? null : { v, fixed: true };
+      }
+      let best = -1;
+      let bs = 0;
+      let bf = 0;
+      const free = (v) => graph.neighbors[v].filter((u) => !colors[u]).length;
+      for (let v = 0; v < n; v++) {
+        if (colors[v]) continue;
+        const s = popcount(domains[v] & ~tried[v]);
+        const f = free(v);
+        if (best < 0 || s < bs || (s === bs && f > bf)) [best, bs, bf] = [v, s, f];
+      }
+      if (best < 0) return null;
+      const rivals = range(n).filter((v) => !colors[v] && v !== best && popcount(domains[v] & ~tried[v]) === bs);
+      const reason = !rivals.length ? 'fewest' : rivals.every((v) => free(v) < bf) ? 'free' : 'letter';
+      return { v: best, left: bs, free: bf, reason };
+    };
+    const undo = (fr) => {
+      colors[fr.v] = 0;
+      for (const u of fr.pruned) domains[u] |= bit(fr.color);
+      tried[fr.v] |= bit(fr.color);
+      nodes[fr.node].undone = steps.length;
+      cur = nodes[fr.node].parent;
+    };
+
+    let frame = null;
+    for (;;) {
+      if (steps.length >= maxSteps) {
+        steps.push(snap({ kind: 'limit' }));
+        return { algorithm: 'forward', order, steps, nodes, success: false };
+      }
+      if (!frame) {
+        const why = choose();
+        if (!why) {
+          steps.push(snap({ kind: 'done', used: countColors(colors) }));
+          return { algorithm: 'forward', order, steps, nodes, success: true };
+        }
+        frame = { v: why.v, why };
+      }
+      const v = frame.v;
+      const options = domains[v] & ~tried[v];
+      if (!options) {
+        nodes.push({ parent: cur, v, color: 0, dead: true, step: steps.length });
+        steps.push(snap({ kind: 'deadend', v, why: frame.why }));
+        tried[v] = 0;
+        if (!frames.length) {
+          steps.push(snap({ kind: 'fail' }));
+          return { algorithm: 'forward', order, steps, nodes, success: false };
+        }
+        frame = frames.pop();
+        const old = frame.color;
+        undo(frame);
+        backtracks++;
+        steps.push(snap({ kind: 'undo', v: frame.v, color: old, from: v }));
+        continue;
+      }
+      let c = 1;
+      while (!(options & bit(c))) c++;
+      colors[v] = c;
+      const pruned = [];
+      let wiped = -1;
+      for (const u of graph.neighbors[v]) {
+        if (colors[u] || !(domains[u] & bit(c))) continue;
+        domains[u] &= ~bit(c);
+        pruned.push(u);
+        if (!domains[u] && wiped < 0) wiped = u;
+      }
+      frame.color = c;
+      frame.pruned = pruned;
+      nodes.push({ parent: cur, v, color: c, step: steps.length });
+      frame.node = cur = nodes.length - 1;
+      const available = [];
+      for (let k = 1; k <= NUM_COLORS; k++) if (options & bit(k)) available.push(k);
+      steps.push(snap({ kind: 'assign', v, color: c, available, pruned, why: frame.why }));
+      if (wiped >= 0) {
+        nodes[cur].wipeout = wiped;
+        steps.push(snap({ kind: 'wipeout', v, color: c, u: wiped }));
+        undo(frame);
+        steps.push(snap({ kind: 'undo', v, color: c, from: wiped, wipeout: true }));
+        continue;
+      }
+      frames.push(frame);
+      frame = null;
+    }
+  }
+
+  // Peeling: repeatedly remove the region with the fewest neighbors left.
+  // In any map some region has at most 5 neighbors (a consequence of Euler's
+  // formula), so each removed region has at most 5 neighbors left at that
+  // moment. Then regions come back in reverse order and are colored greedily.
+  function peel(graph, steps, colors, peeled) {
+    const left = graph.neighbors.map((l) => l.length);
+    const order = [];
+    for (let pos = 0; pos < graph.n; pos++) {
+      let v = -1;
+      for (let u = 0; u < graph.n; u++) if (!peeled[u] && (v < 0 || left[u] < left[v])) v = u;
+      const degree = left[v];
+      peeled[v] = 1;
+      for (const u of graph.neighbors[v]) if (!peeled[u]) left[u]--;
+      order.push(v);
+      steps.push({ kind: 'peel', v, pos, degree, colors: colors.slice(), peeled: peeled.slice() });
+    }
+    return order;
+  }
+
+  function smallestLastTrace(graph) {
+    const colors = new Uint8Array(graph.n);
+    const peeled = new Uint8Array(graph.n);
+    const steps = [{ kind: 'start', colors: colors.slice(), peeled: peeled.slice() }];
+    const order = peel(graph, steps, colors, peeled);
+    for (let k = order.length - 1; k >= 0; k--) {
+      const v = order[k];
+      peeled[v] = 0;
+      const { available, blockers } = colorOptions(graph, colors, v, 0);
+      if (!available.length) {
+        steps.push({ kind: 'stuck', v, pos: k, blockers, colors: colors.slice(), peeled: peeled.slice() });
+        return { algorithm: 'peeling', order, steps, success: false };
+      }
+      colors[v] = available[0];
+      steps.push({ kind: 'assign', v, pos: k, color: available[0], available, blockers, colors: colors.slice(), peeled: peeled.slice() });
+    }
+    steps.push({ kind: 'done', colors: colors.slice(), peeled: peeled.slice(), used: countColors(colors) });
+    return { algorithm: 'peeling', order, steps, success: true };
+  }
+
+  // Kempe chains. For colors a and b, a Kempe chain is a connected group of
+  // regions colored a or b. Swapping a and b inside one chain keeps the
+  // coloring valid. If every chain that holds an a-colored neighbor of v holds
+  // no b-colored neighbor of v, swapping those chains frees color a for v.
+  function kempeChain(graph, colors, start, a, b) {
+    const seen = new Set([start]);
+    const queue = [start];
+    for (let i = 0; i < queue.length; i++) {
+      for (const u of graph.neighbors[queue[i]]) {
+        if (!seen.has(u) && (colors[u] === a || colors[u] === b)) {
+          seen.add(u);
+          queue.push(u);
+        }
+      }
+    }
+    return [...seen].sort((x, y) => x - y);
+  }
+
+  // The smallest single swap that frees a color for v, or null.
+  function findKempeSwap(graph, colors, v) {
+    let best = null;
+    for (let a = 1; a <= NUM_COLORS; a++) {
+      for (let b = 1; b <= NUM_COLORS; b++) {
+        if (a === b) continue;
+        const na = graph.neighbors[v].filter((u) => colors[u] === a);
+        const nb = new Set(graph.neighbors[v].filter((u) => colors[u] === b));
+        if (!na.length) continue;
+        const chain = new Set();
+        for (const u of na) if (!chain.has(u)) for (const w of kempeChain(graph, colors, u, a, b)) chain.add(w);
+        if ([...chain].some((w) => nb.has(w))) continue;
+        if (!best || chain.size < best.chain.length) best = { a, b, chain: [...chain].sort((x, y) => x - y), starts: na };
+      }
+    }
+    return best;
+  }
+
+  function applySwap(colors, { a, b, chain }) {
+    for (const u of chain) colors[u] = colors[u] === a ? b : a;
+  }
+
+  // Kempe's own trick for the hard case: one swap that does not free a color
+  // by itself, followed by one that does.
+  function findDoubleSwap(graph, colors, v) {
+    let best = null;
+    for (let a = 1; a <= NUM_COLORS; a++) {
+      for (let b = 1; b <= NUM_COLORS; b++) {
+        if (a === b) continue;
+        for (const u of graph.neighbors[v]) {
+          if (colors[u] !== a) continue;
+          const first = { a, b, chain: kempeChain(graph, colors, u, a, b), starts: [u] };
+          const trial = colors.slice();
+          applySwap(trial, first);
+          const second = findKempeSwap(graph, trial, v);
+          if (second && (!best || first.chain.length + second.chain.length < best[0].chain.length + best[1].chain.length)) {
+            best = [first, second];
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  // Greedy with Kempe repairs: follow the order like greedy; when a region has
+  // no color left, look for a Kempe chain swap (or two, Kempe's trick for the
+  // hard case) that frees a color, instead of giving up.
+  function kempeTrace(graph, order) {
+    const colors = new Uint8Array(graph.n);
+    const steps = [{ kind: 'start', colors: colors.slice() }];
+    let swaps = 0;
+    for (let pos = 0; pos < order.length; pos++) {
+      const v = order[pos];
+      let { available, blockers } = colorOptions(graph, colors, v, 0);
+      if (!available.length) {
+        const single = findKempeSwap(graph, colors, v);
+        const moves = single ? [single] : findDoubleSwap(graph, colors, v);
+        if (!moves) {
+          steps.push({ kind: 'stuck', v, pos, blockers, kempe: true, colors: colors.slice() });
+          return { algorithm: 'kempe', order, steps, success: false, swaps };
+        }
+        moves.forEach((m, i) => {
+          steps.push({ kind: 'chain', v, pos, ...m, blockers, part: i + 1, of: moves.length, colors: colors.slice() });
+          applySwap(colors, m);
+          swaps++;
+          steps.push({ kind: 'swap', v, pos, ...m, part: i + 1, of: moves.length, colors: colors.slice() });
+        });
+        ({ available, blockers } = colorOptions(graph, colors, v, 0));
+      }
+      colors[v] = available[0];
+      steps.push({ kind: 'assign', v, pos, color: available[0], available, blockers, colors: colors.slice() });
+    }
+    steps.push({ kind: 'done', colors: colors.slice(), used: countColors(colors), swaps });
+    return { algorithm: 'kempe', order, steps, success: true, swaps };
+  }
+
+  // Local search (min-conflicts): start with every region colored at random,
+  // then keep recoloring a region that clashes with a neighbor, choosing the
+  // color with the fewest clashes. When no move helps, make a random one.
+  function minConflictsTrace(graph, seed = 1, maxSteps = 4000) {
+    const rand = mulberry32(seed * 7919 + 13);
+    const n = graph.n;
+    const colors = new Uint8Array(n);
+    for (let v = 0; v < n; v++) colors[v] = 1 + Math.floor(rand() * NUM_COLORS);
+    let conflicts = countConflicts(graph, colors);
+    const steps = [{ kind: 'init', colors: colors.slice(), conflicts }];
+    let last = -1;
+    for (;;) {
+      if (conflicts === 0) {
+        steps.push({ kind: 'done', colors: colors.slice(), conflicts, used: countColors(colors) });
+        return { algorithm: 'local', steps, success: true, seed };
+      }
+      if (steps.length >= maxSteps) {
+        steps.push({ kind: 'limit', colors: colors.slice(), conflicts });
+        return { algorithm: 'local', steps, success: false, seed };
+      }
+      const clashing = range(n).filter((v) => graph.neighbors[v].some((u) => colors[u] === colors[v]));
+      for (let k = clashing.length - 1; k > 0; k--) {
+        const m = Math.floor(rand() * (k + 1));
+        [clashing[k], clashing[m]] = [clashing[m], clashing[k]];
+      }
+      let move = null;
+      for (const v of clashing) {
+        if (v === last && clashing.length > 1) continue; // do not move the same region twice in a row
+        const counts = [0, 0, 0, 0, 0];
+        for (const u of graph.neighbors[v]) counts[colors[u]]++;
+        const from = colors[v];
+        let best = Infinity;
+        for (let c = 1; c <= NUM_COLORS; c++) if (c !== from) best = Math.min(best, counts[c]);
+        if (best > counts[from]) continue;
+        const options = [];
+        for (let c = 1; c <= NUM_COLORS; c++) if (c !== from && counts[c] === best) options.push(c);
+        move = { v, from, to: options[Math.floor(rand() * options.length)], counts: counts.slice(1), random: false };
+        break;
+      }
+      if (!move) {
+        const v = clashing[0];
+        const counts = [0, 0, 0, 0, 0];
+        for (const u of graph.neighbors[v]) counts[colors[u]]++;
+        const from = colors[v];
+        let to = 1 + Math.floor(rand() * (NUM_COLORS - 1));
+        if (to >= from) to++;
+        move = { v, from, to, counts: counts.slice(1), random: true };
+      }
+      colors[move.v] = move.to;
+      last = move.v;
+      conflicts = countConflicts(graph, colors);
+      steps.push({ kind: 'move', ...move, colors: colors.slice(), conflicts });
     }
   }
 
   return {
     NUM_COLORS,
-    SEA,
+    bit,
+    popcount,
     buildMap,
     buildGraph,
+    labelPoint,
     pointInPolygon,
     distToBoundary,
+    pairKey,
     ORDERS,
     colorOptions,
+    countConflicts,
+    kempeChain,
     greedyTrace,
     dsaturTrace,
+    dsaturScores,
     backtrackTrace,
-    pairKey,
+    forwardCheckTrace,
+    smallestLastTrace,
+    kempeTrace,
+    minConflictsTrace,
   };
 });
