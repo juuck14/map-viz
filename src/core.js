@@ -367,6 +367,44 @@
     return k;
   }
 
+  // ---------------------------------------------------------------------------
+  // What is still possible: for every uncolored region, the set of colors none
+  // of its colored neighbors has (a bit mask). A region whose set is empty is
+  // "dead": the coloring so far can never be completed.
+  // ---------------------------------------------------------------------------
+
+  function optionMasks(graph, colors) {
+    const masks = new Uint8Array(graph.n);
+    for (let v = 0; v < graph.n; v++) {
+      if (colors[v]) continue;
+      let used = 0;
+      for (const u of graph.neighbors[v]) if (colors[u]) used |= bit(colors[u]);
+      masks[v] = FULL & ~used;
+    }
+    return masks;
+  }
+
+  function deadRegions(graph, colors) {
+    const masks = optionMasks(graph, colors);
+    const out = [];
+    for (let v = 0; v < graph.n; v++) if (!colors[v] && !masks[v]) out.push(v);
+    return out;
+  }
+
+  // For a search trace (backtracking or forward checking): which tree nodes
+  // were placed while some region was already dead ("doomed"), and which lie
+  // below such a node (wasted: nothing under a doomed node can succeed).
+  function searchWaste(graph, trace) {
+    const nodes = trace.nodes;
+    const doomed = nodes.map((nd) => !nd.dead && deadRegions(graph, trace.steps[nd.step].colors).length > 0);
+    const wasted = nodes.map(() => false);
+    nodes.forEach((nd, i) => {
+      const p = nd.parent;
+      if (p >= 0) wasted[i] = doomed[p] || wasted[p];
+    });
+    return { doomed, wasted };
+  }
+
   // Greedy: visit regions in a fixed order; each takes the lowest color no
   // neighbor has. A choice is never revised, so the run can get stuck.
   function greedyTrace(graph, order) {
@@ -791,7 +829,11 @@
     ORDERS,
     colorOptions,
     countConflicts,
+    optionMasks,
+    deadRegions,
+    searchWaste,
     kempeChain,
+    findKempeSwap,
     greedyTrace,
     dsaturTrace,
     dsaturScores,

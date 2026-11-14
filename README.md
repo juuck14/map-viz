@@ -1,44 +1,47 @@
-# Map coloring, step by step
+# Four colors, one at a time
 
 An interactive, self-contained web page for people who have heard of the Four Color
-Theorem but have little background in graph theory. It shows how different algorithms
-choose colors for a map, what happens when a coloring attempt gets stuck, and what the
-computation looks like as a whole.
+Theorem but have little background in graph theory. It does not just replay algorithms:
+it draws *why* they succeed or fail.
 
 **Open `dist/index.html` in any browser.** It is one file with no dependencies and no
 network access.
 
 Proposal and course material: [`ref/`](ref/).
 
-## What it does
+## The idea
 
-- **Color it yourself.** Paint a map with four colors.
-  - Borders where both sides have the same color are marked.
-  - Hovering a region lists its neighbors, and the regions it touches only at a point
-    (which are not neighbors).
-  - "Colors left" shows, for every uncolored region, which colors are still possible.
-- **Graph view.** Each region becomes a dot, and each pair of neighbors is joined by a
-  line that crosses their shared border. Hovering highlights the region and its dot
-  together.
-- **Watch an algorithm.** Step through a run, play it, or scrub. Every step is explained in
-  words and shown on the map. Seven algorithms:
+Every figure uses one visual language:
 
-| Algorithm | Idea | Can it get stuck? |
+- An uncolored region stays **bare** while all four colors are open.
+- Once a neighbor takes a color, the region is **striped** with the colors it can still take.
+- When a region is colored, its color **flies across each border**, and each neighbor that
+  loses the color drops that stripe.
+- A region with no stripes left is **dead**: dark, hatched red, with arrows from the
+  neighbors that block each color.
+
+With this, the trap greedy walks into, DSATUR's rule, and the waste in backtracking are
+visible on the map before any text explains them.
+
+## What it shows
+
+The page is a story in ten sections. Each has one figure for one mechanism.
+
+| § | Section | What the figure shows |
 |---|---|---|
-| Greedy | Fixed order; lowest free color | Yes |
-| DSATUR | Next: the region whose neighbors show the most different colors | Yes, in principle |
-| Peeling | Remove the region with the fewest neighbors left, repeat; color in reverse | Not with 6 colors (Euler) |
-| Kempe chains | Greedy, but when stuck, swap two colors along a Kempe chain | Rarely (Heawood, 1890) |
-| Backtracking | Greedy that goes back and changes earlier choices | No, but can take very long |
-| Forward checking | Backtracking that crosses colors off neighbors' lists and undoes early; optionally "most constrained first" | No |
-| Local search | Random coloring, then repair clashes one region at a time | It can wander; random steps help |
+| 1 | The rule | Paint a map. Clashing borders light up. A slider morphs the map into its graph: regions shrink into dots, and borders become edges. |
+| 2 | Why three colors are not enough | Five around one with three colors. “Show why” draws the odd ring and the forced alternation. |
+| 3 | Every choice takes options away | Paint with stripes and pulses on. Regions die, with blame arrows. |
+| 4 | Greedy | Step through greedy and watch L lose its stripes. At the dead end, arrows show the step each blocking color was set. The timeline marks the steps where L was already dead. |
+| 5 | Most cornered first | Greedy and DSATUR side by side on the same 32-region map. Greedy dies; DSATUR finishes. |
+| 6 | Backtracking | The map and a growing search tree, in sync. Branches grown while some region was already dead are red. Click a branch to jump there. |
+| 7 | Most of the search was wasted | Three searches race on one map, with trees drawn at the same scale: plain backtracking (9,254 tries, 9,177 wasted), forward checking (77), and most-cornered-first forward checking (30). |
+| 8 | Kempe's trick | At greedy's dead end, pick a neighbor and a second color. Its Kempe chain lights up. Swap it, and see whether a color is freed and why. |
+| 9 | Peel the map | Remove the region with the fewest neighbors, again and again, then rebuild. This is the idea behind the six- and five-color proofs. |
+| 10 | Playground | Seven methods on eight maps, with orders, the search tree, and step explanations. |
 
-- **Under the hood.** Charts of the whole run; click any of them to jump to that step.
-  - A timeline of every region's color at every step, for every algorithm.
-  - A search tree that grows as backtracking explores and abandons branches.
-  - Free colors at each decision, for greedy-type algorithms.
-  - Neighbors left at each removal, for peeling, with Euler's bound of 5.
-  - Clashing borders over time, for local search.
+Section 7 rests on a fact the tests check node for node: forward checking's search tree
+is exactly backtracking's tree with every branch below a doomed choice removed.
 
 ## Maps
 
@@ -80,13 +83,15 @@ npm run generate
 ## Structure
 
 ```
-src/core.js         map geometry, neighbors from shapes, algorithm traces (no DOM; runs in Node)
+src/core.js         map geometry, neighbors from shapes, algorithm traces, options/dead/waste analysis (no DOM; runs in Node)
 src/checker.js      independent checker: uses the generator's neighbor list
 src/maps-data.js    the generated maps (arcs, regions, recorded neighbors)
-src/charts.js       canvas charts for "Under the hood"
-src/ui.js           page logic
+src/view-map.js     MapView: SVG map with stripes, pulses, arrows, chains, map-to-graph morph
+src/view-tree.js    TreeView: canvas search tree, with wasted branches in red
+src/player.js       step player with a timeline strip of the whole run
+src/page.js         the ten sections, wired from the pieces above
 src/style.css       styles (light and dark)
-src/index.html      page template
+src/index.html      page text and template
 build.js            inlines everything into dist/index.html
 tools/generate-maps.mjs   the map generator
 tools/smoke.js      headless-browser smoke test and screenshots
@@ -124,9 +129,16 @@ The tests cover:
 - **Claims made on the page.** "Five around one" is not 3-colorable (brute force), and the
   behaviors promised in the map notes really happen.
 - **Hand-traced runs.** Small runs traced by hand are compared step by step.
+- **What the page claims.** Option sets and dead regions match the checker's neighbors.
+  Forward checking's tree equals backtracking's tree minus the wasted branches, node for
+  node, on 63 runs. Each section's example does what its text says: L dies two steps
+  after it is doomed, greedy fails and DSATUR finishes on Continent, more than 95% of the
+  §7 backtracking run is wasted, and the Kempe chains in §8 succeed or fail for the
+  stated reasons.
 - **Build.** `dist/index.html` must match the sources.
 
-The smoke test runs every algorithm on every map in Chromium and fails on any page error.
+The smoke test drives every figure in light mode, dark mode and at phone width. It runs
+every method on every map in the playground and fails on any page error.
 It needs Playwright:
 
 ```bash

@@ -1,112 +1,125 @@
-// Opens dist/index.html in Chromium, runs every algorithm on every map, fails
-// on any page error, and saves screenshots to the folder given as argv[2].
+// Opens dist/index.html in Chromium, drives every figure (and every method on
+// every map in the playground), fails on any page error, and saves screenshots
+// to the folder given as argv[2].
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
 
 const outDir = process.argv[2] || path.join(__dirname, '..', 'screenshots');
 const pageUrl = 'file://' + path.join(__dirname, '..', 'dist', 'index.html');
-const ALGOS = ['greedy', 'dsatur', 'peeling', 'kempe', 'backtrack', 'forward', 'local'];
 
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });
   const browser = await chromium.launch();
   const errors = [];
-  const shoot = async (page, name) => {
-    await page.waitForTimeout(350); // let fill and switch transitions finish
-    await page.screenshot({ path: path.join(outDir, name + '.png'), fullPage: true });
-  };
 
-  for (const scheme of ['light', 'dark']) {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: scheme });
-    page.on('pageerror', (e) => errors.push(`${scheme}: ${e.message}`));
-    page.on('console', (m) => m.type() === 'error' && errors.push(`${scheme}: ${m.text()}`));
+  for (const [scheme, width] of [['light', 1360], ['dark', 1360], ['light', 390]]) {
+    const tag = `${scheme}-${width}`;
+    const page = await browser.newPage({ viewport: { width, height: 900 }, colorScheme: scheme });
+    page.on('pageerror', (e) => errors.push(`${tag}: ${e.message} ${(e.stack || '').split('\n').slice(1, 4).join(' <')}`));
+    page.on('console', (m) => m.type() === 'error' && errors.push(`${tag}: ${m.text()}`));
     await page.goto(pageUrl);
-    const region = (i) => page.locator(`path.region[data-i="${i}"]`);
-    const mapTab = (title) => page.locator('#map-tabs button', { hasText: title });
-    const algo = (key) => page.locator(`#algo-tabs button[data-algo="${key}"]`);
+    await page.waitForTimeout(600);
+    const region = (fig, i) => page.locator(`#${fig} path.region[data-i="${i}"]`);
+    const shoot = async (sel, name) => {
+      await page.mouse.move(0, 0);
+      const el = await page.$(sel);
+      await el.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(500);
+      await el.screenshot({ path: path.join(outDir, `${tag}-${name}.png`) });
+    };
+    const text = (sel) => page.locator(sel).innerText();
+    const expect = (cond, msg) => cond || errors.push(`${tag}: ${msg}`);
 
-    // Manual coloring with a conflict, hovering a region that touches others at a point.
-    await region(0).dispatchEvent('click');
-    await region(1).dispatchEvent('click');
-    await page.locator('.brush[data-brush="2"]').click();
-    await region(2).dispatchEvent('click');
-    await region(1).hover({ force: true });
-    await shoot(page, `${scheme}-manual`);
-    if (scheme === 'dark') {
-      await page.locator('#mode-tabs button[data-mode="algo"]').click();
-      await mapTab('Continent').click();
-      await algo('forward').click();
-      for (let k = 0; k < 12; k++) await page.locator('#step-fwd').click();
-      await shoot(page, `${scheme}-forward`);
-      await page.close();
-      continue;
+    await page.screenshot({ path: path.join(outDir, `${tag}-hero.png`) });
+
+    // 1: paint a clash, morph to the graph.
+    await region('f1-map', 0).click({ force: true });
+    await region('f1-map', 1).click({ force: true });
+    expect(/1\s*clash/.test(await text('#f1-readout')), 'section 1: a clash is reported');
+    await page.locator('#f1-morph').fill('1000');
+    await shoot('#rules', 's1-graph');
+    await page.locator('#f1-morph').fill('0');
+
+    // 2: the odd ring.
+    await page.locator('#f2-why').click();
+    await page.waitForTimeout(1200);
+    expect(/odd/.test(await text('#f2-readout')), 'section 2: explanation shown');
+    await shoot('#three', 's2-why');
+
+    // 3: paint until something dies.
+    const paint = [[0, 1], [1, 2], [2, 1], [5, 3], [6, 4], [8, 1], [9, 2], [10, 1]];
+    for (const [i, c] of paint) {
+      await page.locator('#f3-brushes .brush').nth(c - 1).click();
+      await region('f3-map', i).click({ force: true });
     }
+    await page.waitForTimeout(700);
+    expect(/is dead/.test(await text('#f3-readout')), 'section 3: dead region reported');
+    await shoot('#options', 's3-dead');
 
-    // Every algorithm on every map, run to the end.
-    await page.locator('#mode-tabs button[data-mode="algo"]').click();
-    const maps = await page.locator('#map-tabs button').count();
-    for (let m = 0; m < maps; m++) {
-      await page.locator('#map-tabs button').nth(m).click();
-      for (const key of ALGOS) {
-        await algo(key).click();
-        await page.locator('#to-end').click();
-        const text = await page.locator('#explain h3').textContent();
-        if (!/Done|Stuck|Stopped/.test(text)) errors.push(`map ${m}, ${key}: last step says "${text}"`);
+    // 4: every order, run to the end.
+    for (const key of ['alphabetical', 'leftToRight', 'mostNeighbors', 'random']) {
+      await page.locator('#f4-order-sel').selectOption(key);
+      await page.locator('#f4-player .pbtn-last').click();
+      expect(/Stuck|Done/.test(await text('#f4-readout')), `section 4 (${key}): run ends in Stuck or Done`);
+    }
+    await page.locator('#f4-order-sel').selectOption('alphabetical');
+    await page.locator('#f4-player .pbtn-last').click();
+    await shoot('#greedy', 's4-stuck');
+
+    // 5: race to the end.
+    await page.locator('#f5-player .pbtn-last').click();
+    expect(/Stuck/.test(await text('#f5-status-a')) && /Done/.test(await text('#f5-status-b')), 'section 5: greedy stuck, DSATUR done');
+    await shoot('#dsatur', 's5-race');
+
+    // 6: step into the run, then to the end.
+    for (let k = 0; k < 70; k++) await page.locator('#f6-player .pbtn-fwd').click();
+    await shoot('#backtrack', 's6-middle');
+    await page.locator('#f6-player .pbtn-last').click();
+    expect(/Done/.test(await text('#f6-readout')), 'section 6: backtracking finishes');
+
+    // 7: run the three searches.
+    await page.locator('#f7-run').click();
+    await page.waitForTimeout(15000);
+    expect((await page.locator('.trio-stat .ok').count()) === 3, 'section 7: all three searches finish');
+    await shoot('#lookahead', 's7-trio');
+
+    // 8: a working swap.
+    await region('f8-map', 9).click({ force: true });
+    await page.locator('#f8-tools .pair').nth(2).click();
+    await page.locator('#f8-tools .btn-main').click();
+    await page.waitForTimeout(1500);
+    expect(/takes/.test(await text('#f8-readout')), 'section 8: L gets a color after the swap');
+    await shoot('#kempe', 's8-swapped');
+
+    // 9: peel and rebuild.
+    await page.locator('#f9-player .pbtn-last').click();
+    expect(/Done/.test(await text('#f9-readout')), 'section 9: rebuild finishes');
+
+    // 10: every method on every map (desktop light only; it is slow).
+    if (tag === 'light-1360') {
+      const maps = await page.locator('#lab-maps .tab').count();
+      const algos = await page.locator('#lab-algos .tab').count();
+      for (let m = 0; m < maps; m++) {
+        await page.locator('#lab-maps .tab').nth(m).click();
+        for (let a = 0; a < algos; a++) {
+          await page.locator('#lab-algos .tab').nth(a).click();
+          await page.locator('#lab-player .pbtn-last').click();
+          const t = await text('#lab-readout');
+          if (!/Done|Stuck|Gave up/.test(t)) errors.push(`${tag}: playground map ${m} method ${a} ends with "${t.slice(0, 60)}"`);
+        }
       }
+      await page.locator('#lab-maps .tab').nth(7).click();
+      await page.locator('#lab-algos .tab').nth(3).click();
+      for (let k = 0; k < 40; k++) await page.locator('#lab-player .pbtn-fwd').click();
+      await shoot('#lab', 's10-playground');
     }
-
-    await mapTab('Greedy trap').click();
-    await algo('greedy').click();
-    await page.locator('#to-end').click();
-    await shoot(page, `${scheme}-greedy-stuck`);
-
-    await algo('kempe').click();
-    const steps = await page.evaluate(() => Number(document.getElementById('scrub').max));
-    for (let s = 0; s <= steps; s++) {
-      await page.locator('#scrub').fill(String(s));
-      if (/Kempe chain/.test(await page.locator('#explain h3').textContent())) break;
-    }
-    await shoot(page, `${scheme}-kempe-chain`);
-
-    await mapTab('Continent').click();
-    await algo('backtrack').click();
-    await page.locator('#order-select').selectOption('random');
-    await page.locator('#scrub').fill('120');
-    await page.locator('.switch', { hasText: 'Graph' }).click();
-    await shoot(page, `${scheme}-backtrack-tree`);
-    await page.locator('.switch', { hasText: 'Graph' }).click();
-
-    await mapTab('Patchwork').click();
-    await algo('local').click();
-    await page.locator('#scrub').fill('30');
-    await shoot(page, `${scheme}-local`);
-
-    await mapTab('Archipelago').click();
-    await algo('peeling').click();
-    await page.locator('#scrub').fill('20');
-    await shoot(page, `${scheme}-peeling`);
-
-    // Pick your own order by clicking every region.
-    await mapTab('Five around one').click();
-    await algo('greedy').click();
-    await page.locator('#order-select').selectOption('custom');
-    const n = await page.locator('path.region').count();
-    for (let i = n - 1; i >= 0; i--) await region(i).dispatchEvent('click');
-    const count = await page.locator('#step-count').textContent();
-    if (!/^Step 0 of \d+$/.test(count)) errors.push(`after picking an order: "${count}"`);
-
-    await page.setViewportSize({ width: 390, height: 900 });
-    await mapTab('Isthmus').click();
-    await shoot(page, `${scheme}-mobile`);
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
-    if (overflow) errors.push('horizontal overflow at 390px');
     await page.close();
   }
   await browser.close();
   if (errors.length) {
-    console.error('Smoke test found problems:\n' + errors.join('\n'));
+    console.error(errors.join('\n'));
     process.exit(1);
   }
-  console.log('Smoke test passed; screenshots in ' + outDir);
+  console.log(`Smoke test passed; screenshots in ${outDir}`);
 })();
