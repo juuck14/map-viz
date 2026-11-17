@@ -4,8 +4,11 @@ An interactive, self-contained web page for people who have heard of the Four Co
 Theorem but have little background in graph theory. It does not just replay algorithms:
 it draws *why* they succeed or fail.
 
-**Open `dist/index.html` in any browser.** It is one file with no dependencies and no
-network access.
+**Live: <https://juuck14.github.io/map-viz/>**, or open `dist/index.html` in any browser.
+It is one file with no dependencies and no network access.
+
+Every push to `main` rebuilds the page, runs the tests, and publishes it to GitHub Pages
+(`.github/workflows/pages.yml`). If the tests fail, nothing is published.
 
 Proposal and course material: [`ref/`](ref/).
 
